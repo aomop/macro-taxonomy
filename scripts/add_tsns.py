@@ -39,8 +39,8 @@ import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "add_tsns_input"
-OUTPUT_DIR = DATA_DIR / "add_tsns_output"
+INPUT_DIR = DATA_DIR / "add_tsns_data"
+OUTPUT_DIR = DATA_DIR / "add_tsns_data"
 CACHE_DIR = DATA_DIR / "add_tsns_cache"
 
 ITIS_BASE = "https://www.itis.gov/ITISWebService/jsonservice"

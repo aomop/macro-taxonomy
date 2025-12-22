@@ -31,8 +31,8 @@ import pandas as pd
 # Base paths
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "add_tsns_output"
-OUTPUT_DIR = DATA_DIR / "build_input"
+INPUT_DIR = DATA_DIR / "add_tsns_data"
+OUTPUT_DIR = INPUT_DIR
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

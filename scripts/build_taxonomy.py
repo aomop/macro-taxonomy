@@ -10,7 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "build_input"
+INPUT_DIR = DATA_DIR / "add_tsns_data"
 CACHE_DIR = DATA_DIR / "build_cache"
 OUTPUT_DIR = DATA_DIR / "build_output"
 
