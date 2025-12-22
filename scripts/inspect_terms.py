@@ -11,6 +11,7 @@ see what ITIS actually uses and refine REGION_POSITIVE_PATTERNS.
 
 Usage:
     python inspect_region_terms.py
+
 """
 
 from __future__ import annotations
