@@ -31,11 +31,13 @@ import pandas as pd
 # Base paths
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "input"
+INPUT_DIR = DATA_DIR / "add_tsns_output"
+OUTPUT_DIR = DATA_DIR / "build_input"
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-BUILD_TAXONOMY_SCRIPT = PROJECT_ROOT / "build_taxonomy.py"
-FLAG_REGIONS_SCRIPT = PROJECT_ROOT / "flag_regions.py"
+BUILD_TAXONOMY_SCRIPT = PROJECT_ROOT / "scripts" / "build_taxonomy.py"
+FLAG_REGIONS_SCRIPT = PROJECT_ROOT / "scripts" / "flag_regions.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,7 +66,7 @@ def get_latest_tsn_list() -> Path:
 
 def make_new_tsn_list_path() -> Path:
     today = date.today().strftime("%Y%m%d")
-    base = INPUT_DIR / f"tsn_list_{today}.csv"
+    base = OUTPUT_DIR / f"tsn_list_{today}.csv"
     if not base.exists():
         return base
 
@@ -76,7 +78,7 @@ def make_new_tsn_list_path() -> Path:
         i += 1
 
 
-def append_tsns(tsns_to_add: List[str]) -> None:
+def append_tsns(tsns_to_add: List[str]) -> Path:
     """Append TSNs to latest tsn_list and write a new dated snapshot."""
     latest_path = get_latest_tsn_list()
     df = pd.read_csv(latest_path, dtype={"TSN": str})
@@ -88,7 +90,7 @@ def append_tsns(tsns_to_add: List[str]) -> None:
 
     if not new_tsns:
         print("[pipeline] No new TSNs to add (all already present).")
-        return
+        return sync_latest_tsn_list()
 
     print(f"[pipeline] Adding {len(new_tsns)} new TSN(s): {', '.join(new_tsns)}")
 
@@ -99,6 +101,22 @@ def append_tsns(tsns_to_add: List[str]) -> None:
     out_path = make_new_tsn_list_path()
     updated.to_csv(out_path, index=False)
     print(f"[pipeline] New tsn_list snapshot written to: {out_path}")
+    return out_path
+
+
+def sync_latest_tsn_list() -> Path:
+    """Ensure latest tsn_list is available in the pipeline output directory."""
+    latest_input = get_latest_tsn_list()
+    candidates = list(OUTPUT_DIR.glob("tsn_list_*.csv"))
+    latest_output = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+    if latest_output and latest_output.read_bytes() == latest_input.read_bytes():
+        return latest_output
+
+    out_path = make_new_tsn_list_path()
+    out_path.write_bytes(latest_input.read_bytes())
+    print(f"[pipeline] Synced TSN list to build input: {out_path}")
+    return out_path
 
 
 # --- Subprocess helpers -----------------------------------------------------
@@ -125,6 +143,8 @@ def main() -> None:
     # 1) Optionally add TSNs
     if args.tsn:
         append_tsns(args.tsn)
+    else:
+        sync_latest_tsn_list()
 
     # 2) Rebuild taxonomy (uses latest tsn_list internally)
     run_script(BUILD_TAXONOMY_SCRIPT)

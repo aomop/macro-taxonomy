@@ -48,11 +48,11 @@ from tqdm.auto import tqdm  # progress bar
 # Paths and globals
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "build_input"
+INPUT_DIR = DATA_DIR / "build_output"
 OUTPUT_DIR = DATA_DIR / "flag_output"
-CACHE_DIR = DATA_DIR / "itis_cache"
+CACHE_DIR = DATA_DIR / "flag_cache"
 TERM_LOOKUP_PATH = DATA_DIR / "region_term_lookup.csv"
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -79,10 +79,10 @@ def get_latest_taxonomy_file() -> Path:
 def make_output_path(input_path: Path) -> Path:
     """
     Given a taxonomy file path like built_taxonomy_20251205.csv,
-    return built_taxonomy_20251205_with_regions.csv in the same directory.
+    return built_taxonomy_20251205_with_regions.csv in the output directory.
     """
     stem = input_path.stem  # e.g. 'built_taxonomy_20251205'
-    return input_path.with_name(f"{stem}_with_regions.csv")
+    return OUTPUT_DIR / f"{stem}_with_regions.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -442,11 +442,13 @@ def propagate_in_region(
 def main() -> None:
     global TERM_MAP
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     # Load term lookup once
     TERM_MAP = load_term_lookup()
 
     taxonomy_path = get_latest_taxonomy_file()
-    output_path = OUTPUT_DIR
+    output_path = make_output_path(taxonomy_path)
 
     tax = pd.read_csv(
         taxonomy_path,

@@ -2,7 +2,7 @@
 """
 Inspect ITIS jurisdiction/geographic strings from the local cache.
 
-This script scans JSON files in data/itis_cache, extracts:
+This script scans JSON files in data/flag_cache, extracts:
   - jurisdictionValue
   - geographicValue
 
@@ -27,10 +27,11 @@ from tqdm.auto import tqdm
 # Paths
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-CACHE_DIR = DATA_DIR / "itis_cache"
-OUTPUT_PATH = DATA_DIR / "region_term_summary.csv"
+INPUT_DIR = DATA_DIR / "flag_cache"
+OUTPUT_DIR = DATA_DIR / "inspect_output"
+OUTPUT_PATH = OUTPUT_DIR / "region_term_summary.csv"
 
 
 def extract_terms_from_record(data: Dict[str, Any]) -> List[str]:
@@ -42,7 +43,11 @@ def extract_terms_from_record(data: Dict[str, Any]) -> List[str]:
 
     # Jurisdiction strings
     juris = data.get("jurisdiction") or {}
-    origin_list = juris.get("jurisdictionalOriginList") or []
+    origin_list = (
+        juris.get("jurisdictionalOrigins")
+        or juris.get("jurisdictionalOriginList")
+        or []
+    )
     for rec in origin_list or []:
         val = rec.get("jurisdictionValue")
         if val:
@@ -50,7 +55,11 @@ def extract_terms_from_record(data: Dict[str, Any]) -> List[str]:
 
     # Geographic division strings
     geo = data.get("geo_divisions") or {}
-    div_list = geo.get("geographicDivisionList") or []
+    div_list = (
+        geo.get("geoDivisions")
+        or geo.get("geographicDivisionList")
+        or []
+    )
     for rec in div_list or []:
         val = rec.get("geographicValue")
         if val:
@@ -60,13 +69,13 @@ def extract_terms_from_record(data: Dict[str, Any]) -> List[str]:
 
 
 def main() -> None:
-    if not CACHE_DIR.exists():
-        raise SystemExit(f"Cache directory not found: {CACHE_DIR}")
+    if not INPUT_DIR.exists():
+        raise SystemExit(f"Cache directory not found: {INPUT_DIR}")
 
-    cache_files = sorted(CACHE_DIR.glob("*.json"))
+    cache_files = sorted(INPUT_DIR.glob("*.json"))
     if not cache_files:
         raise SystemExit(
-            f"No JSON cache files found in {CACHE_DIR}. "
+            f"No JSON cache files found in {INPUT_DIR}. "
             "Run flag_regions.py first to populate the cache."
         )
 
@@ -99,6 +108,7 @@ def main() -> None:
         [{"term": term, "count": count} for term, count in counter.most_common()]
     )
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUTPUT_PATH, index=False)
     print(f"[inspect_region_terms] Wrote summary to: {OUTPUT_PATH}")
     print("[inspect_region_terms] Top 20 terms:")

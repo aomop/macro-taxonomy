@@ -4,7 +4,7 @@ add_tsns.py
 
 Usage examples
 --------------
-# Typical usage: use latest tsn_list_*.csv in current directory
+# Typical usage: use latest tsn_list_*.csv in data/add_tsns_input
 python add_tsns.py --tsn 123456
 
 # Explicitly specify a different tsn_list file as the input template
@@ -13,12 +13,12 @@ python add_tsns.py --tsn 123456 --csv data/tsn_list_mayflies.csv
 Behavior
 --------
 - Determines an *input* tsn_list CSV (two columns: TSN, genus):
-    * --csv path if provided, otherwise the most recent tsn_list_*.csv in cwd.
+    * --csv path if provided, otherwise the most recent tsn_list_*.csv in data/add_tsns_input.
 - Uses ITIS to get all downstream taxa from the given TSN.
 - Filters to rankName == "Genus" (plus the root TSN if it is a genus).
 - Loads existing rows from the input CSV.
 - Adds any new (TSN, genus) pairs that aren't already present.
-- Writes results to a **new** CSV whose name is:
+- Writes results to a **new** CSV in data/add_tsns_output whose name is:
     tsn_list_YYYYMMDD.csv
   If that exists, uses:
     tsn_list_YYYYMMDD_1.csv, _2, etc.
@@ -37,10 +37,16 @@ from collections import Counter, deque
 from tqdm.auto import tqdm
 import requests
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = PROJECT_ROOT / "data"
+INPUT_DIR = DATA_DIR / "add_tsns_input"
+OUTPUT_DIR = DATA_DIR / "add_tsns_output"
+CACHE_DIR = DATA_DIR / "add_tsns_cache"
+
 ITIS_BASE = "https://www.itis.gov/ITISWebService/jsonservice"
 
 # Simple JSON cache of downstream hierarchies
-CACHE_PATH = Path("data/cache/itis_hierarchy_cache.json")
+CACHE_PATH = CACHE_DIR / "itis_hierarchy_cache.json"
 
 
 # ----------------------------------------------------------------------
@@ -214,13 +220,13 @@ def get_genus_descendants(root_tsn: str):
 # ----------------------------------------------------------------------
 def find_latest_tsn_list(base_dir: Path) -> Path:
     """
-    Find the most recently modified tsn_list_*.csv in base_dir/data/input.
+    Find the most recently modified tsn_list_*.csv in base_dir/data/add_tsns_input.
     Raises RuntimeError if none are found.
     """
-    candidates = list(base_dir.glob("data/input/tsn_list_*.csv"))
+    candidates = list(base_dir.glob("data/add_tsns_input/tsn_list_*.csv"))
     if not candidates:
         raise RuntimeError(
-            f"No tsn_list_*.csv files found in {base_dir.resolve()}/data/input. "
+            f"No tsn_list_*.csv files found in {base_dir.resolve()}/data/add_tsns_input. "
             "Use --csv to specify a file explicitly."
         )
 
@@ -266,16 +272,16 @@ def load_existing_tsn_list(csv_path: Path):
     return existing
 
 
-def get_dated_output_path(input_csv: Path) -> Path:
+def get_dated_output_path() -> Path:
     """
-    Given an input CSV path, return a new output path that:
+    Return a new output path in data/add_tsns_output that:
       - appends _YYYYMMDD to 'tsn_list'
       - if that exists, appends _YYYYMMDD_1, _YYYYMMDD_2, etc.
     """
     today_str = date.today().strftime("%Y%m%d")
-    stem = "tsn_list"              # unified stem
-    suffix = input_csv.suffix      # usually ".csv"
-    parent = input_csv.parent
+    stem = "tsn_list"
+    suffix = ".csv"
+    parent = OUTPUT_DIR
 
     # First candidate: tsn_list_YYYYMMDD.csv
     base_name = f"{stem}_{today_str}{suffix}"
@@ -338,7 +344,7 @@ def parse_args(argv=None):
         default=None,
         help=(
             "Path to a tsn_list CSV (two columns: TSN, genus) to use as input. "
-            "If omitted, uses the most recent tsn_list_*.csv in data/input."
+            "If omitted, uses the most recent tsn_list_*.csv in data/add_tsns_input."
         ),
     )
 
@@ -347,6 +353,9 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     root_tsn = str(args.tsn)
 
@@ -378,7 +387,7 @@ def main(argv=None):
     print(f"[INFO] Added {added} new TSNs")
 
     # Determine output CSV path (date-stamped, non-overwriting)
-    output_csv = get_dated_output_path(input_csv)
+    output_csv = get_dated_output_path()
     print(f"[INFO] Output CSV (new file): {output_csv}")
 
     # Write to new output file

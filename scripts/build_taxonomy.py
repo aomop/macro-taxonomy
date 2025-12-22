@@ -8,17 +8,17 @@ import xml.etree.ElementTree as ET
 from tqdm.auto import tqdm as auto_tqdm
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "input"
-CACHE_DIR = DATA_DIR / "cache"
+INPUT_DIR = DATA_DIR / "build_input"
+CACHE_DIR = DATA_DIR / "build_cache"
 OUTPUT_DIR = DATA_DIR / "build_output"
 
 # Import tqdm for pandas integration
 auto_tqdm.pandas()
 
 def get_latest_tsn_list() -> Path:
-    """Return the most recently modified tsn_list_*.csv in data/input/."""
+    """Return the most recently modified tsn_list_*.csv in data/build_input/."""
     candidates = list(INPUT_DIR.glob("tsn_list_*.csv"))
     if not candidates:
         raise FileNotFoundError(
@@ -56,8 +56,10 @@ async def main_async_fetch():
             data = await result
             results.append(data)
     
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    hierarchy_path = CACHE_DIR / "hierarchy_full.csv"
     # Write results to CSV
-    with open(r'data\cache\hierarchy_full.csv', 'w', newline='', encoding='utf-8') as f:
+    with hierarchy_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, delimiter='|', quoting=csv.QUOTE_ALL)
         writer.writerow(['Hierarchy'])  # Write the header
         for result in results:
@@ -83,7 +85,7 @@ def parse_hierarchy(xml_content):
 def get_text(element):
     return element.text if element is not None else None
 
-def process_xml_from_csv(file_path):
+def process_xml_from_csv(file_path: Path):
     df = pd.read_csv(file_path)
     # Ensure that all entries in 'Hierarchy' are strings; replace NaN with empty strings
     df['Hierarchy'] = df['Hierarchy'].fillna('')
@@ -171,28 +173,35 @@ desired_order = ['taxon', 'level', 'Group', 'tsn', 'parentTsn', 'Kingdom', 'Subk
                  'Subtribe', 'Genus', 'Subgenus', 'Species']
 
 def run_pipeline():
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
     # Asynchronously fetch XML data
     asyncio.run(main_async_fetch())
 
     # Process the fetched XML data
-    parsed_data = process_xml_from_csv(r'data\cache\hierarchy_full.csv')
+    hierarchy_path = CACHE_DIR / "hierarchy_full.csv"
+    parsed_data = process_xml_from_csv(hierarchy_path)
     
     # Drop duplicates in parsed_data, focusing on the 'taxon' column
     parsed_data = parsed_data.drop_duplicates(subset=['taxon'], keep='first')
 
     # Save the cleaned parsed_data (optional step depending on need)
-    parsed_data.to_csv(r'data\cache\parsed_data_full.csv', index=False)
+    parsed_path = CACHE_DIR / "parsed_data_full.csv"
+    parsed_data.to_csv(parsed_path, index=False)
 
     # Load and process parsed data
-    itis_data = pd.read_csv(r'data\cache\parsed_data_full.csv')
+    itis_data = pd.read_csv(parsed_path)
     itis_data.drop_duplicates(subset='tsn', inplace=True)
     itis_data.set_index('tsn', inplace=True)
     taxonomy = itis_data.index.to_series().progress_apply(lambda x: trace_hierarchy(x, itis_data))
     taxonomy.fillna(value=pd.NA, inplace=True)
-    taxonomy.to_csv(r'data\cache\expanded_data_full.csv', index=False)
+    expanded_path = CACHE_DIR / "expanded_data_full.csv"
+    taxonomy.to_csv(expanded_path, index=False)
 
     # Load expanded data and determine lowest taxon
-    taxonomy = pd.read_csv(r'data\cache\expanded_data_full.csv')
+    taxonomy = pd.read_csv(expanded_path)
     taxonomy[['taxon', 'level']] = taxonomy.apply(get_taxon_and_level, axis=1)
 
     # Load cleaned parsed_data to retrieve tsn and parentTsn
@@ -204,8 +213,8 @@ def run_pipeline():
     taxonomy = taxonomy[desired_order]
 
     # Save the final DataFrame with groups and tsn, parentTsn
-    output_file_path = f'data\\output\\built_taxonomy_{date_str}.csv'
-    taxonomy.to_csv(output_file_path, index=False, na_rep= 'NA')
+    output_file_path = OUTPUT_DIR / f"built_taxonomy_{date_str}.csv"
+    taxonomy.to_csv(output_file_path, index=False, na_rep="NA")
     print(f"Final taxonomy data with groups saved to {output_file_path}")
 
 if __name__ == '__main__':
