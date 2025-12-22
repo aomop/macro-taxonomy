@@ -1,3 +1,21 @@
+"""
+Build the taxonomy table from the latest TSN list.
+
+This script:
+  - Loads the most recent tsn_list_*.csv in data/add_tsns_data
+  - Fetches full ITIS hierarchy XML for each TSN (async)
+  - Parses and flattens hierarchy data into a taxonomy table
+  - Writes output to data/build_output/built_taxonomy_YYYYMMDD.csv
+
+Usage examples:
+    # Build taxonomy from the latest TSN list
+    python scripts/build_taxonomy.py
+
+    # Rebuild after adding TSNs
+    python scripts/add_tsns.py --tsn 12345
+    python scripts/build_taxonomy.py
+"""
+
 import pandas as pd
 import asyncio
 import csv
