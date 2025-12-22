@@ -1,0 +1,21 @@
+term,count,in_region_term
+north america,10045,TRUE
+continental us,6927,TRUE
+south america,6641,FALSE
+southern asia,6133,FALSE
+africa,3877,FALSE
+middle america,3430,FALSE
+australia,2543,FALSE
+europe northern asia excluding china,2505,FALSE
+mexico,2175,FALSE
+canada,2001,TRUE
+caribbean,1138,FALSE
+oceania,550,FALSE
+hawaii,427,FALSE
+alaska,340,FALSE
+caribbean territories,181,FALSE
+indo west pacific,26,FALSE
+central pacific territories,22,FALSE
+western atlantic ocean,10,FALSE
+east pacific,4,FALSE
+eastern atlantic ocean,3,FALSE
