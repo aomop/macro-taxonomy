@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Tuple
 
 import aiohttp
 import pandas as pd
-from tqdm.auto import tqdm  # progress bar
+from tqdm.asyncio import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -50,39 +50,12 @@ from tqdm.auto import tqdm  # progress bar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "build_output"
-OUTPUT_DIR = DATA_DIR / "flag_output"
 CACHE_DIR = DATA_DIR / "flag_cache"
 TERM_LOOKUP_PATH = DATA_DIR / "region_term_lookup.csv"
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = "https://www.itis.gov/ITISWebService/jsonservice"
-
-# Global term → bool map, loaded once in main()
-TERM_MAP: Dict[str, bool] = {}
-
-
-def get_latest_taxonomy_file() -> Path:
-    """Return the most recently modified built_taxonomy_*.csv in data/build_output/."""
-    candidates = list(INPUT_DIR.glob("built_taxonomy_*.csv"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No built_taxonomy_*.csv files found in {INPUT_DIR}. "
-            "Run build_taxonomy.py first."
-        )
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
-    print(f"[flag_regions] Using taxonomy file: {latest}")
-    return latest
-
-
-def make_output_path(input_path: Path) -> Path:
-    """
-    Given a taxonomy file path like built_taxonomy_20251205.csv,
-    return built_taxonomy_20251205_with_regions.csv in the output directory.
-    """
-    stem = input_path.stem  # e.g. 'built_taxonomy_20251205'
-    return OUTPUT_DIR / f"{stem}_with_regions.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +268,7 @@ async def fetch_and_flag_tsn(
     tsn: str,
     session: aiohttp.ClientSession,
     sem: asyncio.Semaphore,
+    term_map: Dict[str, bool],
 ) -> Tuple[str, bool]:
     """
     Fetch ITIS data for a single TSN (using cache when possible),
@@ -324,12 +298,13 @@ async def fetch_and_flag_tsn(
     else:
         data = cached
 
-    in_region = classify_in_region(data, TERM_MAP)
+    in_region = classify_in_region(data, term_map)
     return tsn, in_region
 
 
 async def flag_all_tsns_async(
     tsns: List[str],
+    term_map: Dict[str, bool],
     concurrency: int = 10,
 ) -> Dict[str, bool]:
     """
@@ -351,12 +326,12 @@ async def flag_all_tsns_async(
         sem = asyncio.Semaphore(concurrency)
 
         tasks = [
-            fetch_and_flag_tsn(tsn, session, sem)
+            fetch_and_flag_tsn(tsn, session, sem, term_map)
             for tsn in tsns
         ]
 
-        for coro in tqdm(
-            asyncio.as_completed(tasks),
+        async for coro in tqdm.as_completed(
+            tasks,
             total=len(tasks),
             desc="Flagging leaf taxa",
             unit="tsn",
@@ -439,22 +414,11 @@ def propagate_in_region(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    global TERM_MAP
+def flag_regions(tax: pd.DataFrame) -> pd.DataFrame:
+    """Add in_region column to taxonomy DataFrame and return it."""
+    term_map = load_term_lookup()
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Load term lookup once
-    TERM_MAP = load_term_lookup()
-
-    taxonomy_path = get_latest_taxonomy_file()
-    output_path = make_output_path(taxonomy_path)
-
-    tax = pd.read_csv(
-        taxonomy_path,
-        dtype={"tsn": str, "parentTsn": str},
-        low_memory=False,
-    )
+    tax = tax.copy()
     if "tsn" not in tax.columns:
         raise ValueError("Taxonomy file must have a 'tsn' column.")
     if "parentTsn" not in tax.columns:
@@ -472,14 +436,9 @@ def main() -> None:
     print(f"[flag_regions] Found {len(all_tsns)} unique TSNs in taxonomy.")
     print(f"[flag_regions] Identified {len(leaf_tsns)} leaf TSNs (will query ITIS for these).")
 
-    # If you want to test on a subset, uncomment and adjust:
-    # test_size = 1000
-    # leaf_tsns = leaf_tsns[:test_size]
-    # print(f"[flag_regions] TEST RUN: querying ITIS for {len(leaf_tsns)} leaf TSNs.")
-
     # Run async flagger for leaves only
     leaf_in_region_map = asyncio.run(
-        flag_all_tsns_async(leaf_tsns, concurrency=10)
+        flag_all_tsns_async(leaf_tsns, term_map, concurrency=10)
     )
 
     # Propagate up to all TSNs
@@ -488,15 +447,10 @@ def main() -> None:
     # Map back to dataframe; default True if somehow missing
     tax["in_region"] = tax["tsn"].map(lambda tsn: full_in_region_map.get(tsn, True))
 
-    tax.to_csv(output_path, index=False)
-    print(f"[flag_regions] Written taxonomy with in_region flag to: {output_path}")
-
-    
-
     # Simple summary
     print("[flag_regions] in_region value counts:")
     print(tax["in_region"].value_counts())
 
+    return tax
 
-if __name__ == "__main__":
-    main()
+

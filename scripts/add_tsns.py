@@ -218,15 +218,15 @@ def get_genus_descendants(root_tsn: str):
 # ----------------------------------------------------------------------
 # CSV helpers
 # ----------------------------------------------------------------------
-def find_latest_tsn_list(base_dir: Path) -> Path:
+def find_latest_tsn_list() -> Path:
     """
-    Find the most recently modified tsn_list_*.csv in base_dir/data/add_tsns_input.
+    Find the most recently modified tsn_list_*.csv in data/add_tsns_data.
     Raises RuntimeError if none are found.
     """
-    candidates = list(base_dir.glob("data/add_tsns_input/tsn_list_*.csv"))
+    candidates = list(INPUT_DIR.glob("tsn_list_*.csv"))
     if not candidates:
         raise RuntimeError(
-            f"No tsn_list_*.csv files found in {base_dir.resolve()}/data/add_tsns_input. "
+            f"No tsn_list_*.csv files found in {INPUT_DIR}. "
             "Use --csv to specify a file explicitly."
         )
 
@@ -363,7 +363,7 @@ def main(argv=None):
     if args.csv is not None:
         input_csv = Path(args.csv)
     else:
-        input_csv = find_latest_tsn_list(Path("."))
+        input_csv = find_latest_tsn_list()
 
     print(f"[INFO] Root TSN: {root_tsn}")
     print(f"[INFO] Input CSV (read-only): {input_csv}")

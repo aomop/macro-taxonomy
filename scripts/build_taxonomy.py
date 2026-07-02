@@ -1,6 +1,5 @@
 import pandas as pd
 import asyncio
-import csv
 import datetime
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -11,14 +10,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 INPUT_DIR = DATA_DIR / "add_tsns_data"
-CACHE_DIR = DATA_DIR / "build_cache"
 OUTPUT_DIR = DATA_DIR / "build_output"
 
 # Import tqdm for pandas integration
 auto_tqdm.pandas()
 
 def get_latest_tsn_list() -> Path:
-    """Return the most recently modified tsn_list_*.csv in data/build_input/."""
+    """Return the most recently modified tsn_list_*.csv in data/add_tsns_data/."""
     candidates = list(INPUT_DIR.glob("tsn_list_*.csv"))
     if not candidates:
         raise FileNotFoundError(
@@ -31,7 +29,7 @@ def get_latest_tsn_list() -> Path:
 
 # Asynchronous fetching of XML hierarchy data
 async def fetch_full_hierarchy(session, tsn):
-    url = f"http://www.itis.gov/ITISWebService/services/ITISService/getFullHierarchyFromTSN?tsn={tsn}"
+    url = f"https://www.itis.gov/ITISWebService/services/ITISService/getFullHierarchyFromTSN?tsn={tsn}"
     try:
         async with session.get(url) as response:
             if response.status == 200:
@@ -46,8 +44,8 @@ async def fetch_full_hierarchy(session, tsn):
         print(f"Error fetching hierarchy for TSN {tsn}: {str(e)}")
         return None
 
-async def main_async_fetch():
-    tsn_list_path = get_latest_tsn_list()
+async def _fetch_all_hierarchies(tsn_list_path: Path) -> list:
+    """Fetch all XML hierarchies and return as a list of XML strings."""
     tsn_df = pd.read_csv(tsn_list_path, dtype={"TSN": str})
     async with aiohttp.ClientSession() as session:
         tasks = [fetch_full_hierarchy(session, tsn) for tsn in tsn_df['TSN']]
@@ -55,16 +53,8 @@ async def main_async_fetch():
         for result in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Fetching Hierarchies"):
             data = await result
             results.append(data)
-    
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    hierarchy_path = CACHE_DIR / "hierarchy_full.csv"
-    # Write results to CSV
-    with hierarchy_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f, delimiter='|', quoting=csv.QUOTE_ALL)
-        writer.writerow(['Hierarchy'])  # Write the header
-        for result in results:
-            writer.writerow([result])  # Write each result as a row
-            
+    return results
+
 # XML Parsing
 def parse_hierarchy(xml_content):
     ns = {'ax21': 'http://data.itis_service.itis.usgs.gov/xsd'}
@@ -85,23 +75,17 @@ def parse_hierarchy(xml_content):
 def get_text(element):
     return element.text if element is not None else None
 
-def process_xml_from_csv(file_path: Path):
-    df = pd.read_csv(file_path)
-    # Ensure that all entries in 'Hierarchy' are strings; replace NaN with empty strings
-    df['Hierarchy'] = df['Hierarchy'].fillna('')
+def process_xml_results(xml_results: list) -> pd.DataFrame:
+    """Parse a list of XML strings into a combined DataFrame."""
     all_data = []
-
-    for xml_string in df['Hierarchy']:
+    for xml_string in xml_results:
         if isinstance(xml_string, str) and xml_string.strip():
-            # Only parse non-empty strings
             hierarchy_data = parse_hierarchy(xml_string)
             all_data.append(hierarchy_data)
-
     if all_data:
-        combined_data = pd.concat(all_data, ignore_index=True)
-        return combined_data
+        return pd.concat(all_data, ignore_index=True)
     else:
-        return pd.DataFrame()  # Return an empty DataFrame if no valid XML data was processed
+        return pd.DataFrame()
 
 # Tracing Taxonomy Hierarchy
 def trace_hierarchy(tsn, itis_data):
@@ -129,82 +113,49 @@ def get_taxon_and_level(row):
             last_valid_level = rank
     return pd.Series([last_valid_taxon, last_valid_level], index=['taxon', 'level'])
 
-def apply_group_mapping(taxonomy):
-    # Dictionary for mapping orders to groups
-    order_to_group = {
-        "Ephemeroptera": "Dragonflies, Mayflies, Damselflies, and Caddisflies - EOT Orders",
-        "Odonata": "Dragonflies, Mayflies, Damselflies, and Caddisflies - EOT Orders",
-        "Trichoptera": "Dragonflies, Mayflies, Damselflies, and Caddisflies - EOT Orders",
-        "Zygoptera": "Dragonflies, Mayflies, Damselflies, and Caddisflies - EOT Orders",
-        "Coleoptera": "Beetles - Order Coleoptera",
-        "Diptera": "Flies and Midges - Order Diptera",
-        "Hemiptera": "True Bugs - Order Hemiptera",
-        "Amphipoda": "Crustaceans - Subclass Eumalacostraca",
-        "Decapoda": "Crustaceans - Subclass Eumalacostraca",
-        "Isopoda": "Crustaceans - Subclass Eumalacostraca",  # Assuming Isopoda also fits here
-        "Diplostraca": "Crustaceans - Subclass Eumalacostraca",
-        "Anostraca": "Crustaceans - Subclass Eumalacostraca",
-        "Hirudinida": "Leeches - Order Hirudinida",
-        "Sphaeriida": "Other Non-Insect Invertebrates",
-        "Gastropoda": "Snails - Gastropoda",
-        "Lepidoptera": "Other Aquatic Insects",  # Lepidoptera generally aren't aquatic, grouped generally
-        "Megaloptera": "Other Aquatic Insects",  # Close to aquatic insects
-        "Neuroptera": "Other Aquatic Insects",  # More terrestrial, grouped generally
-        "Littorinida": "Snails - Class Gastropoda",  # Snails
-        "Viviparida": "Snails - Class Gastropoda",  # Snails
-        "Ectobranchia": "Other Non-Insect Invertebrates",  # Aquatic non-insects
-        "Poduromorpha": "Other Non-Insect Invertebrates", # Spring tails
-        "Lymnaeida": "Snails - Class Gastropoda"  # Freshwater snails
-    }
-
-    # Apply the group mapping based on 'Order' column which should exist in taxonomy DataFrame
+def apply_group_mapping(taxonomy, mapping_path=None):
+    if mapping_path is None:
+        mapping_path = DATA_DIR / "group_mapping.csv"
+    mapping_df = pd.read_csv(mapping_path)
+    order_to_group = dict(zip(mapping_df["order"], mapping_df["group"]))
     taxonomy['Group'] = taxonomy['Order'].map(order_to_group).fillna('NA')
-
     return taxonomy
-
-current_date = datetime.datetime.now()
-
-# Format the date as YYYYMMDD or any other format you prefer
-date_str = current_date.strftime('%Y%m%d')
 
 desired_order = ['taxon', 'level', 'Group', 'tsn', 'parentTsn', 'Kingdom', 'Subkingdom', 'Infrakingdom', 'Superphylum', 'Phylum', 'Subphylum',
                  'Superclass', 'Class', 'Subclass', 'Infraclass', 'Superorder', 'Order',
                  'Suborder', 'Infraorder', 'Superfamily', 'Family', 'Subfamily', 'Tribe',
                  'Subtribe', 'Genus', 'Subgenus', 'Species']
 
-def run_pipeline():
+
+def build_taxonomy() -> pd.DataFrame:
+    """Build the full taxonomy table in memory and return it as a DataFrame."""
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Asynchronously fetch XML data
-    asyncio.run(main_async_fetch())
+    tsn_list_path = get_latest_tsn_list()
+    xml_results = asyncio.run(_fetch_all_hierarchies(tsn_list_path))
 
-    # Process the fetched XML data
-    hierarchy_path = CACHE_DIR / "hierarchy_full.csv"
-    parsed_data = process_xml_from_csv(hierarchy_path)
-    
+    # Process the fetched XML data in memory
+    parsed_data = process_xml_results(xml_results)
+
     # Drop duplicates in parsed_data, focusing on the 'taxon' column
+    before = len(parsed_data)
     parsed_data = parsed_data.drop_duplicates(subset=['taxon'], keep='first')
+    dropped = before - len(parsed_data)
+    if dropped:
+        print(f"[build_taxonomy] Dropped {dropped} duplicate taxon name(s) (homonyms kept: first occurrence).")
 
-    # Save the cleaned parsed_data (optional step depending on need)
-    parsed_path = CACHE_DIR / "parsed_data_full.csv"
-    parsed_data.to_csv(parsed_path, index=False)
-
-    # Load and process parsed data
-    itis_data = pd.read_csv(parsed_path)
+    # Process parsed data
+    itis_data = parsed_data.copy()
     itis_data.drop_duplicates(subset='tsn', inplace=True)
     itis_data.set_index('tsn', inplace=True)
     taxonomy = itis_data.index.to_series().progress_apply(lambda x: trace_hierarchy(x, itis_data))
     taxonomy.fillna(value=pd.NA, inplace=True)
-    expanded_path = CACHE_DIR / "expanded_data_full.csv"
-    taxonomy.to_csv(expanded_path, index=False)
 
-    # Load expanded data and determine lowest taxon
-    taxonomy = pd.read_csv(expanded_path)
+    # Determine lowest taxon
     taxonomy[['taxon', 'level']] = taxonomy.apply(get_taxon_and_level, axis=1)
 
-    # Load cleaned parsed_data to retrieve tsn and parentTsn
+    # Retrieve tsn and parentTsn
     taxonomy = taxonomy.merge(parsed_data[['tsn', 'parentTsn', 'taxon']], on='taxon', how='left')
 
     # Apply group mapping
@@ -212,10 +163,14 @@ def run_pipeline():
 
     taxonomy = taxonomy[desired_order]
 
-    # Save the final DataFrame with groups and tsn, parentTsn
-    output_file_path = OUTPUT_DIR / f"built_taxonomy_{date_str}.csv"
-    taxonomy.to_csv(output_file_path, index=False, na_rep="NA")
-    print(f"Final taxonomy data with groups saved to {output_file_path}")
+    print(f"[build_taxonomy] Built taxonomy with {len(taxonomy)} rows.")
+    return taxonomy
+
 
 if __name__ == '__main__':
-    run_pipeline()
+    tax = build_taxonomy()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    date_str = datetime.datetime.now().strftime('%Y%m%d')
+    output_file_path = OUTPUT_DIR / f"built_taxonomy_{date_str}.csv"
+    tax.to_csv(output_file_path, index=False, na_rep="NA")
+    print(f"Final taxonomy data with groups saved to {output_file_path}")

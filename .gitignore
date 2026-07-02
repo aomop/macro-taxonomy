@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# TAXONOMY project — generated/cache data (do not commit)
+data/flag_cache/
+data/common_names_cache/
+data/inat_cache/
+data/add_tsns_cache/
+data/build_cache/
+data/build_output/
+data/flag_output/
+data/output/
+data/inspect_output/

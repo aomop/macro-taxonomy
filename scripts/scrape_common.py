@@ -1,29 +1,29 @@
 #!/usr/bin/env python
 """
-Add English common names to the taxonomy table using ITIS common name data.
+Add English common names to the taxonomy table.
 
-For performance and data sparsity reasons:
-  * We only query ITIS for leaf taxa (taxa with no children, typically species).
-  * We then propagate common names upward through the parentTsn hierarchy:
-      - Leaf: as retrieved from ITIS
-      - Internal node: collect all unique common names from children
-      - Any unresolved nodes get empty common names
+Sources (in priority order):
+  1. ITIS — queried by TSN for all taxa
+  2. iNaturalist — queried by scientific name for taxa where ITIS returned
+     nothing (genus-and-above by default; species optionally)
+
+Names are NOT propagated up the hierarchy from child taxa.
 
 Run this AFTER build_taxonomy.py, which should produce a built_taxonomy_*.csv
-with columns including at least 'tsn' and 'parentTsn'.
+with columns including at least 'tsn', 'taxon', and 'level'.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections import defaultdict
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 import aiohttp
 import pandas as pd
-from tqdm.auto import tqdm  # progress bar
+from tqdm.asyncio import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -32,35 +32,14 @@ from tqdm.auto import tqdm  # progress bar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-INPUT_DIR = DATA_DIR / "build_output"
-OUTPUT_DIR = DATA_DIR / "common_names_output"
-CACHE_DIR = DATA_DIR / "common_names_cache"
+ITIS_CACHE_DIR = DATA_DIR / "common_names_cache"
+INAT_CACHE_DIR = DATA_DIR / "inat_cache"
 
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+ITIS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+INAT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-BASE_URL = "https://www.itis.gov/ITISWebService/jsonservice"
-
-
-def get_latest_taxonomy_file() -> Path:
-    """Return the most recently modified built_taxonomy_*.csv in data/build_output/."""
-    candidates = list(INPUT_DIR.glob("built_taxonomy_*.csv"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No built_taxonomy_*.csv files found in {INPUT_DIR}. "
-            "Run build_taxonomy.py first."
-        )
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
-    print(f"[common_names] Using taxonomy file: {latest}")
-    return latest
-
-
-def make_output_path(input_path: Path) -> Path:
-    """
-    Given a taxonomy file path like built_taxonomy_20251205.csv,
-    return built_taxonomy_20251205_with_common_names.csv in the output directory.
-    """
-    stem = input_path.stem  # e.g. 'built_taxonomy_20251205'
-    return OUTPUT_DIR / f"{stem}_with_common_names.csv"
+ITIS_BASE_URL = "https://www.itis.gov/ITISWebService/jsonservice"
+INAT_BASE_URL = "https://api.inaturalist.org/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -68,237 +47,261 @@ def make_output_path(input_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _cache_path(tsn: str) -> Path:
-    return CACHE_DIR / f"{tsn}.json"
-
-
-def _load_cache(tsn: str) -> Dict[str, Any] | None:
-    path = _cache_path(tsn)
+def _load_json_cache(cache_dir: Path, key: str) -> Dict[str, Any] | None:
+    path = cache_dir / f"{key}.json"
     if not path.exists():
         return None
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def _save_cache(tsn: str, data: Dict[str, Any]) -> None:
-    path = _cache_path(tsn)
+def _save_json_cache(cache_dir: Path, key: str, data: Dict[str, Any]) -> None:
+    path = cache_dir / f"{key}.json"
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f)
 
 
 # ---------------------------------------------------------------------------
-# ITIS async HTTP
+# Rate limiter for iNaturalist
 # ---------------------------------------------------------------------------
 
 
-async def _itis_get_async(
-    session: aiohttp.ClientSession, endpoint: str, tsn: str
+class RateLimiter:
+    """Serialises request starts to at most *per_second* per second."""
+
+    def __init__(self, per_second: float) -> None:
+        self._min_interval = 1.0 / per_second
+        self._last = 0.0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = asyncio.get_event_loop().time()
+            wait = self._min_interval - (now - self._last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = asyncio.get_event_loop().time()
+
+
+# ---------------------------------------------------------------------------
+# Generic async HTTP helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    label: str = "",
+    rate_limiter: RateLimiter | None = None,
 ) -> Dict[str, Any] | None:
-    """
-    Async GET wrapper for ITIS JSON endpoints.
-
-    Returns None on error (we'll treat missing info as unknown/empty).
-    """
-    url = f"{BASE_URL}/{endpoint}?tsn={tsn}"
+    """GET *url* and return parsed JSON, or None on any error."""
     try:
-        async with session.get(url, timeout=10) as resp:
+        if rate_limiter:
+            await rate_limiter.acquire()
+        async with session.get(url) as resp:
             if resp.status != 200:
-                # Not fatal; just means no info
                 return None
-
-            # ITIS sometimes uses text/json;charset=iso-8859-1 instead of application/json,
-            # which confuses aiohttp's default json() check. Override content_type.
             try:
                 return await resp.json(content_type=None)
             except Exception:
-                # Fallback: parse manually from text
                 text = await resp.text()
-                import json as _json
-
                 try:
-                    return _json.loads(text)
+                    return json.loads(text)
                 except Exception:
                     return None
     except Exception as e:
-        print(f"[WARN] ITIS request failed for TSN {tsn}, endpoint {endpoint}: {e}")
+        print(f"[WARN] Request failed ({label}): {e}")
         return None
 
 
 # ---------------------------------------------------------------------------
-# Extract English common names from ITIS data
+# Name normalisation helpers
 # ---------------------------------------------------------------------------
 
 
-def extract_common_names(itis_data: Dict[str, Any]) -> List[str]:
+def _normalise_key(name: str) -> str:
+    """Lowercase and strip everything except letters and digits for dedup."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def dedupe_common_names(names: List[str]) -> List[str]:
     """
-    Extract English common names from ITIS getCommonNamesFromTSN response.
-    
-    Returns a list of unique English common names.
+    Deduplicate near-identical common names and title-case the results.
+
+    Names that differ only by spacing, hyphens, or capitalisation are treated
+    as duplicates.  The longest variant is kept (most likely to have proper
+    spacing), then title-cased.
+
+    Example:
+        ["lightning bugs", "lightningbugs", "fireflies"]
+        -> ["Fireflies", "Lightning Bugs"]
     """
-    names: Set[str] = set()
-    
-    common_names_list = itis_data.get("commonNames") or []
-    
-    for rec in common_names_list:
+    groups: Dict[str, str] = {}
+    for name in names:
+        key = _normalise_key(name)
+        if not key:
+            continue
+        existing = groups.get(key, "")
+        if len(name) > len(existing):
+            groups[key] = name
+    return sorted(v.title() for v in groups.values())
+
+
+# ---------------------------------------------------------------------------
+# ITIS: fetch common names by TSN
+# ---------------------------------------------------------------------------
+
+
+def extract_itis_common_names(itis_data: Dict[str, Any]) -> List[str]:
+    """Extract English common names from an ITIS getCommonNamesFromTSN response."""
+    names: List[str] = []
+    for rec in itis_data.get("commonNames") or []:
         if isinstance(rec, dict):
-            language = rec.get("language", "")
-            common_name = rec.get("commonName", "")
-            
-            # Only include English names
-            if language == "English" and common_name:
-                names.add(common_name.strip())
-    
-    return sorted(names)  # Return sorted list for consistency
+            if rec.get("language") == "English" and rec.get("commonName"):
+                names.append(rec["commonName"].strip())
+    return dedupe_common_names(names)
 
 
-# ---------------------------------------------------------------------------
-# Async driver for leaf TSNs
-# ---------------------------------------------------------------------------
-
-
-async def fetch_common_names_for_tsn(
+async def _fetch_itis_common_names(
     tsn: str,
     session: aiohttp.ClientSession,
     sem: asyncio.Semaphore,
 ) -> Tuple[str, List[str]]:
-    """
-    Fetch ITIS common names for a single TSN (using cache when possible).
-
-    Returns:
-        (tsn, list_of_english_common_names)
-    """
-    # 1) Check cache first (no network)
-    cached = _load_cache(tsn)
+    """Return (tsn, list_of_english_names) using ITIS, with per-TSN cache."""
+    cached = _load_json_cache(ITIS_CACHE_DIR, tsn)
     if cached is None:
         async with sem:
-            data = await _itis_get_async(session, "getCommonNamesFromTSN", tsn)
-        
+            url = f"{ITIS_BASE_URL}/getCommonNamesFromTSN?tsn={tsn}"
+            data = await _get_json(session, url, label=f"ITIS TSN {tsn}")
         if data is None:
             data = {"tsn": tsn, "commonNames": []}
-        
-        _save_cache(tsn, data)
+        _save_json_cache(ITIS_CACHE_DIR, tsn, data)
     else:
         data = cached
-
-    common_names = extract_common_names(data)
-    return tsn, common_names
+    return tsn, extract_itis_common_names(data)
 
 
-async def fetch_all_common_names_async(
+async def fetch_all_itis(
     tsns: List[str],
     concurrency: int = 10,
 ) -> Dict[str, List[str]]:
-    """
-    Async driver that fetches common names for a set of TSNs using limited concurrency.
-
-    Returns a dict mapping TSN -> list of English common names.
-    """
-    common_names_map: Dict[str, List[str]] = {}
-
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        connect=10,
-        sock_connect=10,
-        sock_read=10,
-    )
+    """Fetch ITIS common names for all *tsns* (async, cached)."""
+    result: Dict[str, List[str]] = {}
+    timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=10)
     connector = aiohttp.TCPConnector(limit=concurrency)
-
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         sem = asyncio.Semaphore(concurrency)
-
-        tasks = [
-            fetch_common_names_for_tsn(tsn, session, sem)
-            for tsn in tsns
-        ]
-
-        for coro in tqdm(
-            asyncio.as_completed(tasks),
+        tasks = [_fetch_itis_common_names(tsn, session, sem) for tsn in tsns]
+        async for coro in tqdm.as_completed(
+            tasks,
             total=len(tasks),
-            desc="Fetching common names for leaf taxa",
+            desc="ITIS common names",
             unit="tsn",
         ):
             tsn, names = await coro
-            common_names_map[tsn] = names
-
-    return common_names_map
+            result[tsn] = names
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Propagate common names from leaves up the taxonomy tree
+# iNaturalist: fetch common names by scientific name + rank
 # ---------------------------------------------------------------------------
 
+# iNat supports these rank strings (lowercase).  Map our taxonomy's 'level'
+# column values to iNat rank strings.
+_RANK_MAP = {
+    "Kingdom": "kingdom",
+    "Subkingdom": "subkingdom",
+    "Infrakingdom": "infrakingdom",
+    "Superphylum": "superphylum",
+    "Phylum": "phylum",
+    "Subphylum": "subphylum",
+    "Superclass": "superclass",
+    "Class": "class",
+    "Subclass": "subclass",
+    "Infraclass": "infraclass",
+    "Superorder": "superorder",
+    "Order": "order",
+    "Suborder": "suborder",
+    "Infraorder": "infraorder",
+    "Superfamily": "superfamily",
+    "Family": "family",
+    "Subfamily": "subfamily",
+    "Tribe": "tribe",
+    "Subtribe": "subtribe",
+    "Genus": "genus",
+    "Subgenus": "subgenus",
+    "Species": "species",
+}
 
-def propagate_common_names(
-    tax: pd.DataFrame,
-    leaf_common_names: Dict[str, List[str]],
+
+def extract_inat_common_name(inat_data: Dict[str, Any], scientific_name: str) -> str:
+    """
+    Return the preferred English common name from an iNat /v1/taxa response,
+    matching *scientific_name* exactly.  Returns empty string if not found.
+    """
+    for result in inat_data.get("results") or []:
+        if result.get("name") == scientific_name:
+            name = result.get("preferred_common_name") or result.get("english_common_name") or ""
+            return name.strip().title()
+    return ""
+
+
+async def _fetch_inat_common_name(
+    tsn: str,
+    scientific_name: str,
+    rank: str,
+    session: aiohttp.ClientSession,
+    rate_limiter: RateLimiter,
+) -> Tuple[str, str]:
+    """Return (tsn, common_name) from iNaturalist, with per-TSN cache."""
+    cached = _load_json_cache(INAT_CACHE_DIR, tsn)
+    if cached is not None:
+        return tsn, extract_inat_common_name(cached, scientific_name)
+
+    # Build query URL
+    inat_rank = _RANK_MAP.get(rank, rank.lower())
+    url = f"{INAT_BASE_URL}/taxa?q={scientific_name}&rank={inat_rank}&per_page=5"
+
+    data = await _get_json(session, url, label=f"iNat {scientific_name}", rate_limiter=rate_limiter)
+    if data is None:
+        data = {"results": []}
+    _save_json_cache(INAT_CACHE_DIR, tsn, data)
+    return tsn, extract_inat_common_name(data, scientific_name)
+
+
+async def fetch_all_inat(
+    taxa: List[Tuple[str, str, str]],
+    rate_per_sec: float = 1.5,
 ) -> Dict[str, str]:
     """
-    Given:
-      - tax: taxonomy table with columns 'tsn' and 'parentTsn'
-      - leaf_common_names: common names for leaf TSNs only
+    Fetch iNat common names for a list of (tsn, scientific_name, rank) tuples.
 
-    Return:
-      - full_common_names: common names for *all* TSNs as semicolon-separated strings
-          * Leaf TSNs: as given from leaf_common_names
-          * Internal nodes: all unique common names from all children
-          * Anything we can't resolve gets empty string
+    Returns a dict mapping TSN -> common name string (may be empty).
+    Rate-limited to *rate_per_sec* actual HTTP requests per second.
     """
-    tax = tax.copy()
-    tax["tsn"] = tax["tsn"].astype(str)
-    if "parentTsn" not in tax.columns:
-        raise ValueError("Taxonomy file must have a 'parentTsn' column to propagate names.")
-    tax["parentTsn"] = tax["parentTsn"].astype(str)
+    result: Dict[str, str] = {}
+    if not taxa:
+        return result
 
-    all_tsns = set(tax["tsn"].dropna())
+    rate_limiter = RateLimiter(rate_per_sec)
+    timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=10)
+    connector = aiohttp.TCPConnector(limit=5)
 
-    # Build child list per parent
-    children_map: Dict[str, List[str]] = defaultdict(list)
-    for _, row in tax[["tsn", "parentTsn"]].dropna().iterrows():
-        parent = row["parentTsn"]
-        child = row["tsn"]
-        children_map[parent].append(child)
-
-    # Start with leaves - convert lists to sets for easier merging
-    full_common_names: Dict[str, Set[str]] = {
-        tsn: set(names) for tsn, names in leaf_common_names.items()
-    }
-
-    remaining = all_tsns - set(full_common_names.keys())
-
-    # Iteratively fill parents when all their children are known
-    changed = True
-    while changed and remaining:
-        changed = False
-        for tsn in list(remaining):
-            children = children_map.get(tsn, [])
-
-            if not children:
-                # No children: weird internal or isolated node; empty names
-                full_common_names[tsn] = set()
-                remaining.remove(tsn)
-                changed = True
-                continue
-
-            # Only propagate if we know all children already
-            if all(child in full_common_names for child in children):
-                # Collect all unique common names from children
-                combined_names: Set[str] = set()
-                for child in children:
-                    combined_names.update(full_common_names[child])
-                
-                full_common_names[tsn] = combined_names
-                remaining.remove(tsn)
-                changed = True
-
-    # Any leftover (e.g., cycles, missing links) -> empty
-    for tsn in remaining:
-        full_common_names[tsn] = set()
-
-    # Convert sets to semicolon-separated strings, sorted for consistency
-    return {
-        tsn: "; ".join(sorted(names)) if names else ""
-        for tsn, names in full_common_names.items()
-    }
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        tasks = [
+            _fetch_inat_common_name(tsn, name, rank, session, rate_limiter)
+            for tsn, name, rank in taxa
+        ]
+        async for coro in tqdm.as_completed(
+            tasks,
+            total=len(tasks),
+            desc="iNaturalist common names",
+            unit="taxon",
+        ):
+            tsn, name = await coro
+            result[tsn] = name
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -306,64 +309,80 @@ def propagate_common_names(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def add_common_names(
+    tax: pd.DataFrame,
+    inat_for_species: bool = False,
+) -> pd.DataFrame:
+    """
+    Add a ``common_names`` column to *tax* and return it.
 
-    taxonomy_path = get_latest_taxonomy_file()
-    output_path = make_output_path(taxonomy_path)
+    1. Query ITIS for every TSN.
+    2. For taxa with no ITIS name, query iNaturalist by scientific name.
+       By default only genus-and-above are sent to iNat.  Pass
+       ``inat_for_species=True`` to also query species (much slower on the
+       first uncached run).
+    """
+    tax = tax.copy()
+    for col in ("tsn", "taxon", "level"):
+        if col not in tax.columns:
+            raise ValueError(f"Taxonomy must have a '{col}' column.")
 
-    tax = pd.read_csv(
-        taxonomy_path,
-        dtype={"tsn": str, "parentTsn": str},
-        low_memory=False,
-    )
-    if "tsn" not in tax.columns:
-        raise ValueError("Taxonomy file must have a 'tsn' column.")
-    if "parentTsn" not in tax.columns:
-        raise ValueError("Taxonomy file must have a 'parentTsn' column to propagate names.")
-
-    # Ensure string types
     tax["tsn"] = tax["tsn"].astype(str)
-    tax["parentTsn"] = tax["parentTsn"].astype(str)
 
-    # Identify leaves (tsns that never appear as parentTsn)
-    all_tsns = set(tax["tsn"].dropna())
-    parent_tsns = set(tax["parentTsn"].dropna())
-    leaf_tsns = sorted(all_tsns - parent_tsns)
+    all_tsns = sorted(set(tax["tsn"].dropna()))
+    print(f"[common_names] {len(all_tsns)} unique TSNs in taxonomy.")
 
-    print(f"[common_names] Found {len(all_tsns)} unique TSNs in taxonomy.")
-    print(f"[common_names] Identified {len(leaf_tsns)} leaf TSNs (will query ITIS for these).")
+    # --- Step 1: ITIS -------------------------------------------------------
+    print("[common_names] Step 1/2: Querying ITIS for all TSNs...")
+    itis_map = asyncio.run(fetch_all_itis(all_tsns, concurrency=10))
 
-    # If you want to test on a subset, uncomment and adjust:
-    # test_size = 100
-    # leaf_tsns = leaf_tsns[:test_size]
-    # print(f"[common_names] TEST RUN: querying ITIS for {len(leaf_tsns)} leaf TSNs.")
+    # Compute ITIS results as semicolon-separated strings
+    itis_str: Dict[str, str] = {
+        tsn: "; ".join(names) if names else ""
+        for tsn, names in itis_map.items()
+    }
 
-    # Run async fetcher for leaves only
-    leaf_common_names_map = asyncio.run(
-        fetch_all_common_names_async(leaf_tsns, concurrency=10)
+    itis_hits = sum(1 for v in itis_str.values() if v)
+    print(f"[common_names] ITIS provided names for {itis_hits}/{len(all_tsns)} taxa.")
+
+    # --- Step 2: iNaturalist for gaps ---------------------------------------
+    # Build list of (tsn, scientific_name, rank) for taxa that ITIS missed.
+    gap_rows = tax[tax["tsn"].map(lambda t: not itis_str.get(t, ""))].copy()
+    if not inat_for_species:
+        gap_rows = gap_rows[gap_rows["level"] != "Species"]
+
+    # Deduplicate by TSN (same TSN may appear in multiple rows in theory)
+    gap_rows = gap_rows.drop_duplicates(subset="tsn")
+    taxa_to_query = list(
+        zip(gap_rows["tsn"], gap_rows["taxon"], gap_rows["level"])
     )
 
-    # Propagate up to all TSNs
-    full_common_names_map = propagate_common_names(tax, leaf_common_names_map)
+    n_gaps = len(taxa_to_query)
+    if n_gaps:
+        est_minutes = n_gaps / (1.5 * 60)
+        print(
+            f"[common_names] Step 2/2: Querying iNaturalist for {n_gaps} taxa "
+            f"without ITIS names (est. ~{est_minutes:.0f} min uncached)..."
+        )
+        inat_map = asyncio.run(fetch_all_inat(taxa_to_query, rate_per_sec=1.5))
+        inat_hits = sum(1 for v in inat_map.values() if v)
+        print(f"[common_names] iNaturalist provided names for {inat_hits}/{n_gaps} queried taxa.")
+    else:
+        inat_map = {}
+        print("[common_names] Step 2/2: No gaps to fill with iNaturalist.")
 
-    # Map back to dataframe
-    tax["common_names"] = tax["tsn"].map(lambda tsn: full_common_names_map.get(tsn, ""))
+    # --- Merge: ITIS takes priority, iNat fills gaps ------------------------
+    def _resolve(tsn: str) -> str:
+        itis_name = itis_str.get(tsn, "")
+        if itis_name:
+            return itis_name
+        return inat_map.get(tsn, "")
 
-    tax.to_csv(output_path, index=False)
-    print(f"[common_names] Written taxonomy with common names to: {output_path}")
+    tax["common_names"] = tax["tsn"].map(_resolve)
 
-    # Simple summary
     has_names = (tax["common_names"] != "").sum()
     total = len(tax)
-    print(f"[common_names] {has_names}/{total} taxa have common names ({100*has_names/total:.1f}%)")
-    
-    # Show some examples
-    print("\n[common_names] Sample entries with common names:")
-    sample = tax[tax["common_names"] != ""].head(10)
-    for _, row in sample.iterrows():
-        print(f"  TSN {row['tsn']}: {row['common_names']}")
+    print(f"[common_names] {has_names}/{total} taxa have common names ({100 * has_names / total:.1f}%)")
+    return tax
 
 
-if __name__ == "__main__":
-    main()

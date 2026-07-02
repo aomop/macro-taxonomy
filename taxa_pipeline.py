@@ -6,38 +6,42 @@ Steps:
   1. Optionally add new TSNs to tsn_list_*.csv (if --tsn is supplied).
      - Reads latest tsn_list_*.csv
      - Writes a new dated snapshot.
-  2. Run build_taxonomy.py to regenerate the taxonomy table from latest tsn_list.
-  3. Run flag_regions.py to add in_region and in_continent flags to the latest taxonomy.
+  2. Build taxonomy table from latest tsn_list (in memory).
+  3. Add in_region flags (in memory).
+  4. Add common_names (in memory).
+  5. Write a single authoritative CSV to data/output/.
 
 Usage examples:
-    # Just rebuild taxonomy + flags
+    # Just rebuild taxonomy + flags + common names
     python taxa_pipeline.py
 
-    # Add new TSNs and then rebuild + flag
+    # Add new TSNs and then rebuild
     python taxa_pipeline.py --tsn 12345 67890
+
+    # Re-run only the common names step on the latest output
+    python taxa_pipeline.py --common-names-only
 """
 
 from __future__ import annotations
 
 import argparse
-import subprocess
-import sys
 from datetime import date
 from pathlib import Path
 from typing import List
 
 import pandas as pd
 
+from scripts.build_taxonomy import build_taxonomy
+from scripts.flag_regions import flag_regions
+from scripts.scrape_common import add_common_names
+
 # Base paths
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 INPUT_DIR = DATA_DIR / "add_tsns_data"
-OUTPUT_DIR = INPUT_DIR
+OUTPUT_DIR = DATA_DIR / "output"
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-BUILD_TAXONOMY_SCRIPT = PROJECT_ROOT / "scripts" / "build_taxonomy.py"
-FLAG_REGIONS_SCRIPT = PROJECT_ROOT / "scripts" / "flag_regions.py"
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         "--tsn",
         nargs="+",
         help="Optional TSNs to add to the latest tsn_list_*.csv before rebuilding.",
+    )
+    parser.add_argument(
+        "--common-names-only",
+        action="store_true",
+        help="Re-run only the common names step on the latest output file.",
     )
     return parser.parse_args()
 
@@ -66,7 +75,7 @@ def get_latest_tsn_list() -> Path:
 
 def make_new_tsn_list_path() -> Path:
     today = date.today().strftime("%Y%m%d")
-    base = OUTPUT_DIR / f"tsn_list_{today}.csv"
+    base = INPUT_DIR / f"tsn_list_{today}.csv"
     if not base.exists():
         return base
 
@@ -90,7 +99,7 @@ def append_tsns(tsns_to_add: List[str]) -> Path:
 
     if not new_tsns:
         print("[pipeline] No new TSNs to add (all already present).")
-        return sync_latest_tsn_list()
+        return latest_path
 
     print(f"[pipeline] Adding {len(new_tsns)} new TSN(s): {', '.join(new_tsns)}")
 
@@ -104,53 +113,64 @@ def append_tsns(tsns_to_add: List[str]) -> Path:
     return out_path
 
 
-def sync_latest_tsn_list() -> Path:
-    """Ensure latest tsn_list is available in the pipeline output directory."""
-    latest_input = get_latest_tsn_list()
-    candidates = list(OUTPUT_DIR.glob("tsn_list_*.csv"))
-    latest_output = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+# --- Pipeline ---------------------------------------------------------------
 
-    if latest_output and latest_output.read_bytes() == latest_input.read_bytes():
-        return latest_output
-
-    out_path = make_new_tsn_list_path()
-    out_path.write_bytes(latest_input.read_bytes())
-    print(f"[pipeline] Synced TSN list to build input: {out_path}")
-    return out_path
-
-
-# --- Subprocess helpers -----------------------------------------------------
-
-def run_script(script_path: Path) -> None:
-    """Run another Python script with the same interpreter, raising on failure."""
-    if not script_path.exists():
-        raise FileNotFoundError(f"Script not found: {script_path}")
-
-    print(f"\n[RUN] {script_path}")
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Script failed: {script_path} (exit code {result.returncode})"
+def get_latest_output() -> Path:
+    """Return the most recent taxonomy_*.csv in data/output/."""
+    candidates = list(OUTPUT_DIR.glob("taxonomy_*.csv"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No taxonomy_*.csv files found in {OUTPUT_DIR}. "
+            "Run the full pipeline first."
         )
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    print(f"[pipeline] Using latest output as base: {latest}")
+    return latest
 
 
 def main() -> None:
     args = parse_args()
 
+    if args.common_names_only:
+        # Re-run only the common names step on the latest output
+        base_path = get_latest_output()
+        tax = pd.read_csv(base_path, dtype={"tsn": str}, low_memory=False)
+        tax = tax.drop(columns=["common_names"], errors="ignore")
+
+        print("\n[pipeline] Re-running common names only...")
+        tax = add_common_names(tax)
+
+        today = date.today().strftime("%Y%m%d")
+        output_path = OUTPUT_DIR / f"taxonomy_{today}.csv"
+        tax.to_csv(output_path, index=False, na_rep="NA")
+        print(f"\n[pipeline] Updated taxonomy written to: {output_path}")
+        print(f"[pipeline] Shape: {tax.shape[0]} rows x {tax.shape[1]} columns")
+        print("\nCommon names update completed successfully.")
+        return
+
     # 1) Optionally add TSNs
     if args.tsn:
         append_tsns(args.tsn)
-    else:
-        sync_latest_tsn_list()
 
-    # 2) Rebuild taxonomy (uses latest tsn_list internally)
-    run_script(BUILD_TAXONOMY_SCRIPT)
+    # 2) Build base taxonomy (in memory)
+    print("\n[pipeline] Step 1/3: Building taxonomy...")
+    tax = build_taxonomy()
 
-    # 3) Add region flags (uses latest built_taxonomy internally)
-    run_script(FLAG_REGIONS_SCRIPT)
+    # 3) Add region flags (in memory)
+    print("\n[pipeline] Step 2/3: Flagging regions...")
+    tax = flag_regions(tax)
+
+    # 4) Add common names (in memory)
+    print("\n[pipeline] Step 3/3: Adding common names...")
+    tax = add_common_names(tax)
+
+    # 5) Write single authoritative output
+    today = date.today().strftime("%Y%m%d")
+    output_path = OUTPUT_DIR / f"taxonomy_{today}.csv"
+    tax.to_csv(output_path, index=False, na_rep="NA")
+    print(f"\n[pipeline] Final taxonomy written to: {output_path}")
+    print(f"[pipeline] Shape: {tax.shape[0]} rows x {tax.shape[1]} columns")
+    print(f"[pipeline] Columns: {list(tax.columns)}")
 
     print("\nAll steps completed successfully.")
 
