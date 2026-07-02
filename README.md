@@ -1,9 +1,8 @@
-<<<<<<< HEAD
 # TAXONOMY
 
 A Python pipeline that builds the macroinvertebrate taxonomy dataset used by the [MacroIBI](https://github.com/aomop/MacroIBI) Shiny application. It queries the [ITIS](https://www.itis.gov/) (Integrated Taxonomic Information System) and [iNaturalist](https://www.inaturalist.org/) APIs to assemble a flat taxonomy table with hierarchical ranks, regional occurrence flags, and English common names.
 
-## What it produces
+## Products
 
 A dated CSV (`data/output/taxonomy_YYYYMMDD.csv`) with one row per taxon and these key columns:
 
@@ -38,7 +37,7 @@ Dependencies: `aiohttp`, `pandas`, `requests`, `tqdm`.
 
 ```
 TAXONOMY/
-├── taxa_pipeline.py          # Main entry point — runs the full pipeline
+├── taxa_pipeline.py          # Main entry point - runs the full pipeline
 ├── requirements.txt
 ├── scripts/
 │   ├── add_tsns.py           # Expand a high-level TSN into all downstream genera
@@ -63,13 +62,13 @@ TAXONOMY/
 
 ## Workflow
 
-### Step 0 — Verify your TSN seed list
+### Step 0 - Verify your TSN seed list
 
 The pipeline starts from a file `data/add_tsns_data/tsn_list_YYYYMMDD.csv` that lists the genera (by ITIS TSN) you want included in the taxonomy. A default list covering wetland macroinvertebrates of the continental United States is already included.
 
 The file must have two columns: `TSN` and `genus`.
 
-### Step 1 (optional) — Add a new taxonomic group
+### Step 1 (optional) - Add a new taxonomic group
 
 To add all genera from a higher-level taxon (e.g. an Order or Family), run `add_tsns.py` with the parent TSN. It performs a breadth-first search down the ITIS hierarchy and merges any new genera into a new dated snapshot of the TSN list.
 
@@ -83,7 +82,7 @@ python scripts/add_tsns.py --tsn <PARENT_TSN> --csv data/add_tsns_data/tsn_list_
 
 This writes a new `data/add_tsns_data/tsn_list_YYYYMMDD.csv` without modifying the input file.
 
-### Step 2 — Run the pipeline
+### Step 2 - Run the pipeline
 
 ```bash
 python taxa_pipeline.py
@@ -91,9 +90,9 @@ python taxa_pipeline.py
 
 This runs three stages in sequence:
 
-1. **Build taxonomy** — fetches full ITIS hierarchies for every TSN in the latest `tsn_list_*.csv`, flattens them into a table with one column per rank, and assigns each taxon to a MacroIBI display group.
-2. **Flag regions** — queries ITIS jurisdiction and geographic division data per leaf taxon to determine `in_region`, then propagates the flag upward through the hierarchy.
-3. **Add common names** — fetches English common names from ITIS for all taxa, with iNaturalist used as a fallback for genera not covered by ITIS.
+1. **Build taxonomy** - fetches full ITIS hierarchies for every TSN in the latest `tsn_list_*.csv`, flattens them into a table with one column per rank, and assigns each taxon to a MacroIBI display group.
+2. **Flag regions** - queries ITIS jurisdiction and geographic division data per leaf taxon to determine `in_region`, then propagates the flag upward through the hierarchy.
+3. **Add common names** - fetches English common names from ITIS for all taxa, with iNaturalist used as a fallback for genera not covered by ITIS.
 
 Output is written to `data/output/taxonomy_YYYYMMDD.csv`.
 
@@ -119,7 +118,7 @@ All ITIS and iNaturalist responses are cached to disk under `data/`. On a **cold
 - Flag regions: 30–60 minutes (async, ~10 concurrent requests, leaf taxa only)
 - Common names: 30–60 minutes (ITIS fast, iNaturalist rate-limited to ~1.5 req/s)
 
-On **warm runs** (cache populated), all three stages complete in under a minute. Caches persist indefinitely — delete the relevant `data/*_cache/` directory to force a refresh from the API.
+On **warm runs** (cache populated), all three stages complete in under a minute. Caches persist indefinitely - delete the relevant `data/*_cache/` directory to force a refresh from the API.
 
 ---
 
@@ -162,101 +161,3 @@ To adapt this for a different geography:
 ## MacroIBI display groups
 
 The `Group` column maps each taxon to one of the nine sections displayed in the MacroIBI data-entry UI. The mapping is defined in `scripts/build_taxonomy.py` (`apply_group_mapping`) and is keyed on the ITIS `Order` column. To add a new group or reassign an order, edit that dictionary and re-run the pipeline.
-=======
-# Macro Taxonomy Pipeline
-
-This repository contains a small set of scripts for building and annotating a macroinvertebrate taxonomy table from ITIS (Integrated Taxonomic Information System) data. The pipeline reads a TSN list, builds a hierarchical taxonomy table, and adds region flags based on ITIS jurisdiction and geographic division data.
-
-## Repository layout
-
-```
-.
-├── data/
-│   ├── add_tsns_data/        # Source and snapshot TSN lists (tsn_list_*.csv)
-│   ├── add_tsns_cache/       # Cached ITIS hierarchy lookups for add_tsns.py
-│   ├── build_cache/          # Cached hierarchy XML and parsed data
-│   ├── build_output/         # built_taxonomy_*.csv outputs
-│   ├── flag_cache/           # Cached ITIS region lookups for flag_regions.py
-│   ├── flag_output/          # *_with_regions.csv outputs
-│   └── region_term_lookup.csv
-├── scripts/
-│   ├── add_tsns.py           # Add TSNs and downstream genera to a TSN list
-│   ├── build_taxonomy.py     # Build taxonomy tables from TSN lists
-│   ├── flag_regions.py       # Add in_region flags to taxonomy tables
-│   └── inspect_terms.py      # Summarize ITIS jurisdiction/geographic terms
-└── taxa_pipeline.py          # End-to-end pipeline runner
-```
-
-## Quick start
-
-1. **(Optional) Add new TSNs** to the latest `tsn_list_*.csv` snapshot.
-
-   ```bash
-   python scripts/add_tsns.py --tsn 12345 67890
-   ```
-
-2. **Build the taxonomy table** from the latest TSN list.
-
-   ```bash
-   python scripts/build_taxonomy.py
-   ```
-
-3. **Flag regions** using ITIS jurisdiction/geographic data and the lookup file.
-
-   ```bash
-   python scripts/flag_regions.py
-   ```
-
-Or run the full pipeline (steps 1–3) in one command:
-
-```bash
-python taxa_pipeline.py --tsn 12345 67890
-```
-
-## Script details
-
-### `scripts/add_tsns.py`
-Adds new TSNs and their downstream genera to a TSN list snapshot.
-
-```bash
-# Use the latest tsn_list_*.csv in data/add_tsns_data
-python scripts/add_tsns.py --tsn 123456
-
-# Use a specific template CSV
-python scripts/add_tsns.py --tsn 123456 --csv data/tsn_list_custom.csv
-```
-
-Outputs a new `tsn_list_YYYYMMDD.csv` in `data/add_tsns_data/` without overwriting existing snapshots.
-
-### `scripts/build_taxonomy.py`
-Fetches ITIS hierarchy XML for each TSN and builds a flattened taxonomy table.
-
-```bash
-python scripts/build_taxonomy.py
-```
-
-Outputs `data/build_output/built_taxonomy_YYYYMMDD.csv`.
-
-### `scripts/flag_regions.py`
-Adds `in_region` flags using ITIS jurisdiction/geographic data and the lookup file at `data/region_term_lookup.csv`.
-
-```bash
-python scripts/flag_regions.py
-```
-
-Outputs `data/flag_output/built_taxonomy_YYYYMMDD_with_regions.csv`.
-
-### `scripts/inspect_terms.py`
-Summarizes jurisdiction/geographic terms found in the ITIS cache to help refine the lookup file.
-
-```bash
-python scripts/inspect_terms.py
-```
-
-Outputs `data/inspect_output/region_term_summary.csv`.
-
-## Notes
-
-- Most scripts rely on the **latest** snapshot matching the expected filename pattern, so keep TSN list and taxonomy snapshots in their respective `data/` subdirectories.
-- ITIS is accessed over the network, so runs may take some time depending on the number of TSNs.
->>>>>>> b5656381609aa56b81640cefeae394ee47f3bebf
