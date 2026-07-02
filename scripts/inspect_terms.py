@@ -7,11 +7,11 @@ This script scans JSON files in data/flag_cache, extracts:
   - geographicValue
 
 and produces a CSV with unique values and counts, so you can
-see what ITIS actually uses and refine REGION_POSITIVE_PATTERNS.
+see what ITIS actually uses and refine region_term_lookup.csv.
 
-Usage:
-    python inspect_region_terms.py
-
+Usage examples:
+    # After running flag_regions.py to populate the cache
+    python scripts/inspect_terms.py
 """
 
 from __future__ import annotations

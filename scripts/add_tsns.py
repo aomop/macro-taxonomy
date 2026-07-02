@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-add_tsns.py
+Add new TSNs (and their downstream genera) to a tsn_list CSV.
 
-Usage examples
---------------
-# Typical usage: use latest tsn_list_*.csv in data/add_tsns_input
-python add_tsns.py --tsn 123456
+Usage examples:
+    # Typical usage: use latest tsn_list_*.csv in data/add_tsns_data
+    python scripts/add_tsns.py --tsn 123456
 
-# Explicitly specify a different tsn_list file as the input template
-python add_tsns.py --tsn 123456 --csv data/tsn_list_mayflies.csv
+    # Explicitly specify a different tsn_list file as the input template
+    python scripts/add_tsns.py --tsn 123456 --csv data/tsn_list_mayflies.csv
 
-Behavior
---------
-- Determines an *input* tsn_list CSV (two columns: TSN, genus):
-    * --csv path if provided, otherwise the most recent tsn_list_*.csv in data/add_tsns_input.
-- Uses ITIS to get all downstream taxa from the given TSN.
-- Filters to rankName == "Genus" (plus the root TSN if it is a genus).
-- Loads existing rows from the input CSV.
-- Adds any new (TSN, genus) pairs that aren't already present.
-- Writes results to a **new** CSV in data/add_tsns_output whose name is:
-    tsn_list_YYYYMMDD.csv
-  If that exists, uses:
-    tsn_list_YYYYMMDD_1.csv, _2, etc.
-- Does NOT overwrite the input file.
+Behavior:
+    - Determines an *input* tsn_list CSV (columns: TSN, genus):
+        * --csv path if provided, otherwise the most recent tsn_list_*.csv in
+          data/add_tsns_data.
+    - Uses ITIS to get all downstream taxa from the given TSN.
+    - Filters to rankName == "Genus" (plus the root TSN if it is a genus).
+    - Loads existing rows from the input CSV.
+    - Adds any new (TSN, genus) pairs that aren't already present.
+    - Writes results to a **new** CSV in data/add_tsns_data named:
+        tsn_list_YYYYMMDD.csv
+      If that exists, uses:
+        tsn_list_YYYYMMDD_1.csv, _2, etc.
+    - Does NOT overwrite the input file.
 """
 
 import argparse

@@ -28,6 +28,14 @@ with at least the columns:
 Where:
   - term: exact strings from region_term_summary.csv (normalized/trimmed)
   - in_region_term: TRUE/FALSE (or 1/0, Yes/No, etc.)
+
+Usage examples:
+    # Build taxonomy, then flag regions
+    python scripts/build_taxonomy.py
+    python scripts/flag_regions.py
+
+    # Full pipeline (adds TSNs, rebuilds, flags regions)
+    python taxa_pipeline.py --tsn 12345 67890
 """
 
 from __future__ import annotations
