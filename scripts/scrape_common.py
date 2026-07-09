@@ -192,7 +192,7 @@ async def fetch_all_itis(
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         sem = asyncio.Semaphore(concurrency)
         tasks = [_fetch_itis_common_names(tsn, session, sem) for tsn in tsns]
-        async for coro in tqdm.as_completed(
+        for coro in tqdm.as_completed(
             tasks,
             total=len(tasks),
             desc="ITIS common names",
@@ -293,7 +293,7 @@ async def fetch_all_inat(
             _fetch_inat_common_name(tsn, name, rank, session, rate_limiter)
             for tsn, name, rank in taxa
         ]
-        async for coro in tqdm.as_completed(
+        for coro in tqdm.as_completed(
             tasks,
             total=len(tasks),
             desc="iNaturalist common names",

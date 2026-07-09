@@ -338,7 +338,7 @@ async def flag_all_tsns_async(
             for tsn in tsns
         ]
 
-        async for coro in tqdm.as_completed(
+        for coro in tqdm.as_completed(
             tasks,
             total=len(tasks),
             desc="Flagging leaf taxa",
