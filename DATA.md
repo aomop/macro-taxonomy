@@ -1,7 +1,6 @@
 # Data provenance and reuse
 
-The `LICENSE` file covers the **code** in this repository. It says nothing about
-the **taxonomic data** the pipeline assembles, which comes from elsewhere. This
+The `LICENSE` file covers the **code** in this repository. The **taxonomic data** the pipeline assembles, which comes from elsewhere, is not covered under this license. This
 document explains where that data comes from and what terms apply to it.
 
 ---
