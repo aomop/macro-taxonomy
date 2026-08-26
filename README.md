@@ -21,6 +21,8 @@ A dated CSV (`data/output/taxonomy_YYYYMMDD.csv`) with one row per taxon and the
 
 This CSV is loaded into MacroIBI via `refresh_taxonomy()` (see [Connecting to MacroIBI](#connecting-to-macroibi)).
 
+> **Provenance.** Every field above is retrieved from ITIS and iNaturalist, not authored here. This project claims no ownership of the data and imposes no restrictions on its use — see [DATA.md](DATA.md) for sources, terms, and citation guidance.
+
 ---
 
 ## Requirements
@@ -250,4 +252,9 @@ pytest tests/
 
 ## License
 
-Released under the [MIT License](LICENSE).
+The **code** in this repository is released under the [MIT License](LICENSE).
+
+The **data** the pipeline produces is a different matter: it is retrieved from
+ITIS and iNaturalist, and this project claims no ownership of it and imposes no
+additional restrictions on its use. See [DATA.md](DATA.md) for provenance,
+upstream terms, and how to cite the sources.
