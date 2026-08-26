@@ -23,7 +23,14 @@ import aiohttp
 from tqdm.asyncio import tqdm
 import xml.etree.ElementTree as ET
 from tqdm.auto import tqdm as auto_tqdm
+import sys
 from pathlib import Path
+
+# Support both `python scripts/build_taxonomy.py` (run directly, so only scripts/ is on
+# sys.path) and `from scripts.build_taxonomy import ...` (imported as a package member).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.file_selection import latest_dated_file
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
@@ -34,14 +41,16 @@ OUTPUT_DIR = DATA_DIR / "build_output"
 auto_tqdm.pandas()
 
 def get_latest_tsn_list() -> Path:
-    """Return the most recently modified tsn_list_*.csv in data/add_tsns_data/."""
-    candidates = list(INPUT_DIR.glob("tsn_list_*.csv"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No tsn_list_*.csv files found in {INPUT_DIR}. "
-            "Make sure to create one (e.g. via add_tsns.py)."
-        )
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    """Return the newest tsn_list_YYYYMMDD.csv in data/add_tsns_data/.
+
+    "Newest" is by the date in the filename, not by mtime -- see
+    :mod:`scripts.file_selection`.
+    """
+    latest = latest_dated_file(
+        INPUT_DIR,
+        "tsn_list",
+        hint="Make sure to create one (e.g. via add_tsns.py).",
+    )
     print(f"[build_taxonomy] Using TSN list: {latest}")
     return latest
 
@@ -131,12 +140,56 @@ def get_taxon_and_level(row):
             last_valid_level = rank
     return pd.Series([last_valid_taxon, last_valid_level], index=['taxon', 'level'])
 
+# Fraction of taxa allowed to fall outside the group mapping before we treat the
+# mapping itself as broken rather than merely incomplete.
+MAX_UNMAPPED_GROUP_SHARE = 0.95
+
+
 def apply_group_mapping(taxonomy, mapping_path=None):
+    """Assign each taxon a MacroIBI display group from data/group_mapping.csv.
+
+    The mapping is a two-column CSV (``order,group``). Group names contain commas,
+    so they must be quoted -- an unquoted row parses as extra columns, which pandas
+    silently absorbs into an index rather than rejecting. That failure mode is why
+    the checks below exist: a mapping that parses "successfully" into nonsense
+    would otherwise leave every taxon with Group='NA' and empty the app's data
+    entry sections.
+    """
     if mapping_path is None:
         mapping_path = DATA_DIR / "group_mapping.csv"
+
     mapping_df = pd.read_csv(mapping_path)
-    order_to_group = dict(zip(mapping_df["order"], mapping_df["group"]))
+
+    missing = {"order", "group"} - set(mapping_df.columns)
+    if missing:
+        raise ValueError(
+            f"{mapping_path} is missing required column(s): {sorted(missing)}. "
+            f"Found columns: {list(mapping_df.columns)}. Expected exactly "
+            "'order,group' -- check that group names containing commas are quoted."
+        )
+
+    order_to_group = {
+        order: group
+        for order, group in zip(mapping_df["order"], mapping_df["group"])
+        if pd.notna(order) and pd.notna(group)
+    }
+    if not order_to_group:
+        raise ValueError(
+            f"{mapping_path} produced an empty order->group mapping. "
+            "Check that group names containing commas are quoted."
+        )
+
     taxonomy['Group'] = taxonomy['Order'].map(order_to_group).fillna('NA')
+
+    unmapped_share = (taxonomy['Group'] == 'NA').mean()
+    if len(taxonomy) and unmapped_share > MAX_UNMAPPED_GROUP_SHARE:
+        raise ValueError(
+            f"{unmapped_share:.1%} of taxa did not match any order in "
+            f"{mapping_path} ({len(order_to_group)} orders mapped). This usually "
+            "means the mapping file is malformed rather than incomplete -- check "
+            "that group names containing commas are quoted."
+        )
+
     return taxonomy
 
 desired_order = ['taxon', 'level', 'Group', 'tsn', 'parentTsn', 'Kingdom', 'Subkingdom', 'Infrakingdom', 'Superphylum', 'Phylum', 'Subphylum',

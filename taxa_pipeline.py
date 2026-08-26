@@ -32,6 +32,7 @@ from typing import List
 import pandas as pd
 
 from scripts.build_taxonomy import build_taxonomy
+from scripts.file_selection import latest_dated_file
 from scripts.flag_regions import flag_regions
 from scripts.scrape_common import add_common_names
 
@@ -62,13 +63,12 @@ def parse_args() -> argparse.Namespace:
 # --- Helpers shared with add_tsns.py ----------------------------------------
 
 def get_latest_tsn_list() -> Path:
-    candidates = list(INPUT_DIR.glob("tsn_list_*.csv"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No tsn_list_*.csv files found in {INPUT_DIR}. "
-            "Create an initial tsn_list_YYYYMMDD.csv first."
-        )
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    """Return the newest tsn_list_YYYYMMDD.csv, by filename date not mtime."""
+    latest = latest_dated_file(
+        INPUT_DIR,
+        "tsn_list",
+        hint="Create an initial tsn_list_YYYYMMDD.csv first.",
+    )
     print(f"[pipeline] Using latest TSN list as base: {latest}")
     return latest
 
@@ -116,14 +116,12 @@ def append_tsns(tsns_to_add: List[str]) -> Path:
 # --- Pipeline ---------------------------------------------------------------
 
 def get_latest_output() -> Path:
-    """Return the most recent taxonomy_*.csv in data/output/."""
-    candidates = list(OUTPUT_DIR.glob("taxonomy_*.csv"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No taxonomy_*.csv files found in {OUTPUT_DIR}. "
-            "Run the full pipeline first."
-        )
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    """Return the newest taxonomy_YYYYMMDD.csv, by filename date not mtime."""
+    latest = latest_dated_file(
+        OUTPUT_DIR,
+        "taxonomy",
+        hint="Run the full pipeline first.",
+    )
     print(f"[pipeline] Using latest output as base: {latest}")
     return latest
 
