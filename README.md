@@ -126,13 +126,58 @@ python taxa_pipeline.py --common-names-only
 
 ## Runtime and caching
 
-All ITIS and iNaturalist responses are cached to disk under `data/`. On a **cold run** (empty cache) with ~5,000 TSNs, expect:
+Every ITIS and iNaturalist response is cached to disk as one JSON file per TSN,
+under four independent directories in `data/`. Each stage checks its own cache
+before touching the network, so the stages warm up separately — it is normal for
+some to be instant while others are still slow.
 
-- Build taxonomy: 15–30 minutes (async, ~10 concurrent requests)
-- Flag regions: 30–60 minutes (async, ~10 concurrent requests, leaf taxa only)
-- Common names: 30–60 minutes (ITIS fast, iNaturalist rate-limited to ~1.5 req/s)
+### Scale
 
-On **warm runs** (cache populated), all three stages complete in under a minute. Caches persist indefinitely - delete the relevant `data/*_cache/` directory to force a refresh from the API.
+The seed list holds roughly 4,900 **genera**, but the pipeline expands those into
+the full hierarchy beneath them. A representative build produces **~57,500 taxa**,
+of which **~51,750 are leaves**. The per-stage query counts follow from that, not
+from the size of the seed list:
+
+| Stage | Cache | Queries | Cold | Warm |
+|---|---|---|---|---|
+| Build taxonomy | `build_cache/` | ~4,900 (one hierarchy per seed genus) | ~2 min | ~45 s |
+| Flag regions | `flag_cache/` | ~51,750 (leaf taxa only) | ~13 min | seconds |
+| Common names — ITIS | `common_names_cache/` | ~57,500 (every taxon) | ~14 min | seconds |
+| Common names — iNaturalist | `inat_cache/` | ~6,600 (only taxa ITIS could not name) | ~75 min | ~1 min |
+
+**Fully cold: 1.5–2 hours. Fully warm: 1–2 minutes.** Anything in between means
+some caches are populated and others are not — a run of ~30 minutes, for example,
+is the normal cost of warm build and iNaturalist caches with cold region and ITIS
+common-name caches.
+
+The network-bound stages run at roughly **65–70 TSN/s**, which is what a
+concurrency of 10 yields against ITIS. iNaturalist is the outlier: it is
+deliberately rate-limited to 1.5 requests/second, so its cold cost dominates a
+first run even though it queries the fewest taxa. Warm cache reads run four
+orders of magnitude faster — all ~51,750 files in well under a second — so if a
+stage is crawling at ~67/s, it is calling the API, not reading the cache.
+
+### Checking which caches are warm
+
+Compare the file count in each cache against the query counts above:
+
+```bash
+# PowerShell
+Get-ChildItem data\*_cache -Directory | ForEach-Object {
+    "{0}: {1}" -f $_.Name, (Get-ChildItem $_ -File).Count
+}
+
+# bash
+for d in data/*_cache/; do echo "$d $(ls -1 "$d" | wc -l)"; done
+```
+
+A directory holding far fewer files than its stage queries will go to the network
+on the next run.
+
+Caches persist indefinitely and are never invalidated automatically — delete a
+`data/*_cache/` directory to force that stage to refetch from the API. Note that
+ITIS jurisdiction data and common names change rarely, so there is little reason
+to clear those caches routinely.
 
 ---
 
