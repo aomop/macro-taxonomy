@@ -1,4 +1,6 @@
-# TAXONOMY
+# macro-taxonomy
+
+[![tests](https://github.com/aomop/macro-taxonomy/actions/workflows/tests.yml/badge.svg)](https://github.com/aomop/macro-taxonomy/actions/workflows/tests.yml)
 
 A Python pipeline that builds the macroinvertebrate taxonomy dataset used by the [MacroIBI](https://github.com/aomop/MacroIBI) Shiny application. It queries the [ITIS](https://www.itis.gov/) (Integrated Taxonomic Information System) and [iNaturalist](https://www.inaturalist.org/) APIs to assemble a flat taxonomy table with hierarchical ranks, regional occurrence flags, and English common names.
 
@@ -31,20 +33,29 @@ pip install -r requirements.txt
 
 Dependencies: `aiohttp`, `pandas`, `requests`, `tqdm`.
 
+To run the test suite as well:
+
+```
+pip install -r requirements.txt -r requirements-dev.txt
+```
+
 ---
 
 ## Directory structure
 
 ```
-TAXONOMY/
+macro-taxonomy/
 ├── taxa_pipeline.py          # Main entry point - runs the full pipeline
-├── requirements.txt
+├── requirements.txt          # Runtime dependencies
+├── requirements-dev.txt      # Test dependencies
 ├── scripts/
 │   ├── add_tsns.py           # Expand a high-level TSN into all downstream genera
 │   ├── build_taxonomy.py     # Fetch ITIS hierarchies and build the flat taxonomy table
 │   ├── flag_regions.py       # Add in_region flag via ITIS jurisdiction data
 │   ├── scrape_common.py      # Add English common names via ITIS + iNaturalist
-│   └── inspect_terms.py      # Diagnostic: audit cached region strings
+│   ├── inspect_terms.py      # Diagnostic: audit cached region strings
+│   └── file_selection.py     # Pick the newest dated file by filename date
+├── tests/                    # pytest suite over the pure (non-API) functions
 └── data/
     ├── add_tsns_data/         # Input: tsn_list_YYYYMMDD.csv files (seed TSN lists)
     ├── add_tsns_cache/        # Cache: ITIS hierarchy traversal results
@@ -55,6 +66,7 @@ TAXONOMY/
     ├── common_names_cache/    # Cache: ITIS common name responses
     ├── inat_cache/            # Cache: iNaturalist responses
     ├── output/                # Final output: taxonomy_YYYYMMDD.csv
+    ├── group_mapping.csv      # Maps ITIS Order to MacroIBI display group
     └── region_term_lookup.csv # Maps ITIS region strings to True/False
 ```
 
@@ -67,6 +79,8 @@ TAXONOMY/
 The pipeline starts from a file `data/add_tsns_data/tsn_list_YYYYMMDD.csv` that lists the genera (by ITIS TSN) you want included in the taxonomy. A default list covering wetland macroinvertebrates of the continental United States is already included.
 
 The file must have two columns: `TSN` and `genus`.
+
+**Which seed list gets used.** When several are present, the pipeline takes the newest by the **date in the filename** — not by file modification time, which git does not preserve and which would make the choice arbitrary on a fresh clone. Same-day revisions carry a `_N` suffix and sort after the plain date, so `tsn_list_20260701_1.csv` beats `tsn_list_20260701.csv`. Older snapshots are kept as history and are safe to leave in place; pass `--csv` to start from one explicitly.
 
 ### Step 1 (optional) - Add a new taxonomic group
 
@@ -160,4 +174,35 @@ To adapt this for a different geography:
 
 ## MacroIBI display groups
 
-The `Group` column maps each taxon to one of the nine sections displayed in the MacroIBI data-entry UI. The mapping is defined in `scripts/build_taxonomy.py` (`apply_group_mapping`) and is keyed on the ITIS `Order` column. To add a new group or reassign an order, edit that dictionary and re-run the pipeline.
+The `Group` column maps each taxon to one of the sections displayed in the MacroIBI data-entry UI. The mapping lives in **`data/group_mapping.csv`** and is keyed on the ITIS `Order` column. To add a group or reassign an order, edit that file and re-run the pipeline — no code change needed.
+
+The file has exactly two columns:
+
+```csv
+order,group
+Coleoptera,Beetles - Order Coleoptera
+Ephemeroptera,"Dragonflies, Mayflies, Damselflies, and Caddisflies - EOT Orders"
+```
+
+> **Quote any group name containing a comma.** Several MacroIBI group names do. An unquoted row parses as extra columns, and pandas absorbs those into an index rather than raising — so the file loads "successfully" as nonsense, every order fails to match, and every taxon ends up with `Group = NA`. `apply_group_mapping()` now validates the parsed mapping and raises if this happens, but the quoting is still yours to get right.
+
+Orders absent from the mapping are assigned `Group = NA`, which is expected for taxa outside the nine display sections.
+
+---
+
+## Testing
+
+The suite covers the pure, non-API functions — region classification and
+propagation, common-name deduplication, TSN appending, group mapping validation,
+and dated-file selection. No network access required.
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest tests/
+```
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).

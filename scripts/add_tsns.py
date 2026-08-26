@@ -36,6 +36,12 @@ from collections import Counter, deque
 from tqdm.auto import tqdm
 import requests
 
+# Support both `python scripts/add_tsns.py` (run directly, so only scripts/ is on
+# sys.path) and `from scripts.add_tsns import ...` (imported as a package member).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.file_selection import latest_dated_file
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 INPUT_DIR = DATA_DIR / "add_tsns_data"
@@ -219,18 +225,16 @@ def get_genus_descendants(root_tsn: str):
 # ----------------------------------------------------------------------
 def find_latest_tsn_list() -> Path:
     """
-    Find the most recently modified tsn_list_*.csv in data/add_tsns_data.
-    Raises RuntimeError if none are found.
-    """
-    candidates = list(INPUT_DIR.glob("tsn_list_*.csv"))
-    if not candidates:
-        raise RuntimeError(
-            f"No tsn_list_*.csv files found in {INPUT_DIR}. "
-            "Use --csv to specify a file explicitly."
-        )
+    Find the newest tsn_list_YYYYMMDD.csv in data/add_tsns_data.
 
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
-    return latest
+    "Newest" is by the date in the filename, not by mtime -- see
+    :mod:`scripts.file_selection`. Raises FileNotFoundError if none are found.
+    """
+    return latest_dated_file(
+        INPUT_DIR,
+        "tsn_list",
+        hint="Use --csv to specify a file explicitly.",
+    )
 
 
 def load_existing_tsn_list(csv_path: Path):
